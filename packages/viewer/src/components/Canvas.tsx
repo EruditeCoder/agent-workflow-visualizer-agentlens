@@ -29,6 +29,7 @@ export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
         if (n.node.label.toLowerCase().includes(filter)) matchSet.add(n.id);
       }
     }
+    const reachableFromSelected = computeReachableForward(graph, selectedId);
     const rfNodes: RFNode[] = laid.nodes.map((n) => ({
       id: n.id,
       type: "awv",
@@ -37,31 +38,50 @@ export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
       selected: n.id === selectedId,
       draggable: true,
     }));
+    const exclusionInfo = computeExclusionGroups(laid.edges);
     const rfEdges: RFEdge[] = laid.edges.map((e) => {
       const isLoop = !!e.meta?.inLoop;
       const isBranch = !!e.meta?.inBranch;
+      const excl = exclusionInfo.get(e.id);
       const dashed = e.kind === "uses-tool" || e.kind === "handles-tool" || isLoop || isBranch;
-      const color =
-        e.kind === "uses-tool"
-          ? "#8b949e"
-          : e.kind === "handles-tool"
-            ? "#a371f7"
-            : isLoop
-              ? "#f0883e"
-              : "#58a6ff";
+      let color: string;
+      if (e.kind === "uses-tool") color = "#8b949e";
+      else if (e.kind === "handles-tool") color = "#a371f7";
+      else if (excl) color = "#6e7681";
+      else if (isLoop) color = "#f0883e";
+      else color = "#58a6ff";
       let label: string | undefined;
       if (e.kind === "uses-tool") label = undefined;
       else if (e.kind === "handles-tool") label = "handles";
+      else if (excl) label = excl.armLabel;
       else if (isLoop) label = "loop";
+
+      let opacity = 1;
+      if (
+        e.kind === "uses-tool" &&
+        e.meta?.viaCallers &&
+        e.meta.viaCallers.length > 0 &&
+        selectedId &&
+        selectedId !== e.source &&
+        selectedId !== e.target
+      ) {
+        const anyMatch = e.meta.viaCallers.some((c) => reachableFromSelected.has(c));
+        if (!anyMatch) opacity = 0.15;
+      }
       return {
         id: e.id,
         source: e.source,
         target: e.target,
-        animated: e.kind === "calls" && isLoop,
+        animated: e.kind === "calls" && isLoop && !excl,
         label,
-        labelStyle: { fontSize: 10, fill: color },
+        labelStyle: { fontSize: 10, fill: color, fontStyle: excl ? "italic" : "normal" },
         labelBgStyle: { fill: "#161b22" },
-        style: { stroke: color, strokeDasharray: dashed ? "4 3" : undefined, strokeWidth: 1.2 },
+        style: {
+          stroke: color,
+          strokeDasharray: dashed ? "4 3" : undefined,
+          strokeWidth: 1.2,
+          opacity,
+        },
       };
     });
     return { rfNodes, rfEdges, bounds: laid.subgraphBounds };
@@ -97,6 +117,50 @@ export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
       ))}
     </div>
   );
+}
+
+function computeReachableForward(graph: Graph, selectedId: string | null): Set<string> {
+  if (!selectedId) return new Set();
+  const out = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (e.kind !== "calls") continue;
+    if (!out.has(e.source)) out.set(e.source, []);
+    out.get(e.source)!.push(e.target);
+  }
+  const seen = new Set<string>([selectedId]);
+  const stack = [selectedId];
+  while (stack.length) {
+    const n = stack.pop()!;
+    for (const next of out.get(n) ?? []) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+  }
+  return seen;
+}
+
+function computeExclusionGroups(edges: import("@awv/shared").GraphEdge[]): Map<string, { groupSize: number; armLabel: string }> {
+  const out = new Map<string, { groupSize: number; armLabel: string }>();
+  const bySourceKey = new Map<string, import("@awv/shared").GraphEdge[]>();
+  for (const e of edges) {
+    if (e.kind !== "calls") continue;
+    const key = e.meta?.branchKey;
+    if (!key) continue;
+    const mapKey = `${e.source}::${key}`;
+    if (!bySourceKey.has(mapKey)) bySourceKey.set(mapKey, []);
+    bySourceKey.get(mapKey)!.push(e);
+  }
+  for (const group of bySourceKey.values()) {
+    const arms = new Set<string>();
+    for (const e of group) arms.add(e.meta?.branchArm ?? "");
+    if (arms.size <= 1) continue;
+    for (const e of group) {
+      out.set(e.id, { groupSize: arms.size, armLabel: e.meta?.branchArm ?? "" });
+    }
+  }
+  return out;
 }
 
 export type { GraphNode };

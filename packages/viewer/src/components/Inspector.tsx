@@ -162,16 +162,50 @@ export function Inspector({ graph, selected, onSelect }: Props) {
 
       {meta.toolNames && meta.toolNames.length > 0 && (
         <>
-          <h2>Tools</h2>
+          <h2>Tools{meta.toolsResolution === "per-caller" ? " (per caller)" : ""}</h2>
           <ul style={{ paddingLeft: 16 }}>
-            {meta.toolNames.map((t) => (
-              <li key={t}>
-                <a className="edge-link" onClick={() => onSelect(`tool:${t}`)}>
-                  <code>{t}</code>
-                </a>
-              </li>
-            ))}
+            {meta.toolNames.map((t) => {
+              const toolEdge = graph.edges.find(
+                (e) =>
+                  e.kind === "uses-tool" &&
+                  e.source === selected.id &&
+                  graph.nodes.find((n) => n.id === e.target)?.label === t,
+              );
+              const id = toolEdge?.target;
+              return (
+                <li key={t}>
+                  {id ? (
+                    <a className="edge-link" onClick={() => onSelect(id)}>
+                      <code>{t}</code>
+                    </a>
+                  ) : (
+                    <code>{t}</code>
+                  )}
+                </li>
+              );
+            })}
           </ul>
+          {meta.perCallerTools && Object.keys(meta.perCallerTools).length > 0 && (
+            <>
+              <h2>Per-caller subsets</h2>
+              <ul className="edge-list">
+                {Object.entries(meta.perCallerTools).map(([callerId, names]) => {
+                  const caller = graph.nodes.find((n) => n.id === callerId);
+                  if (!caller) return null;
+                  return (
+                    <li key={callerId}>
+                      <a className="edge-link" onClick={() => onSelect(callerId)}>
+                        {caller.label}
+                      </a>{" "}
+                      <span style={{ color: "var(--fg-dim)", fontSize: 11 }}>
+                        ({names.length} tools)
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
         </>
       )}
 

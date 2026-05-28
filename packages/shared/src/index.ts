@@ -36,6 +36,9 @@ export interface NodeMeta {
   codeSnippet?: string;
   codeTruncated?: boolean;
   className?: string;
+  containingFnId?: string;
+  perCallerTools?: Record<string, string[]>;
+  toolsResolution?: "literal" | "per-caller" | "unresolved";
 }
 
 export type EdgeKind =
@@ -60,6 +63,9 @@ export interface EdgeMeta {
   isParallel?: boolean;
   awaited?: boolean;
   order?: number;
+  branchKey?: string;
+  branchArm?: string;
+  viaCallers?: string[];
 }
 
 export interface Subgraph {

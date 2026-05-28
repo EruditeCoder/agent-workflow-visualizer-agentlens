@@ -70,6 +70,13 @@ interface AnalyzeContext {
   routeIdx: number;
   routerPrefixes: Map<string, string>;
   toolDefs: Map<string, string>;
+  unresolvedLlmCalls: UnresolvedLlmCall[];
+}
+
+interface UnresolvedLlmCall {
+  llmNodeId: string;
+  containingFnId: string;
+  toolsExpr: Node;
 }
 
 interface AnalyzeOptions {
@@ -111,6 +118,7 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
     routeIdx: 0,
     routerPrefixes: new Map(),
     toolDefs: new Map(),
+    unresolvedLlmCalls: [],
   };
 
   for (const sf of project.getSourceFiles()) {
@@ -149,6 +157,8 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
   for (const fn of ctx.fnById.values()) {
     analyzeFunctionBody(fn, ctx, nodes, edges);
   }
+
+  resolvePerCallerTools(ctx, nodes, edges);
 
   detectToolDispatchers(ctx, nodes, edges);
 
@@ -488,6 +498,7 @@ function analyzeFunctionBody(
   for (const node of calls) {
     const inLoop = isInsideLoop(node, fn.decl);
     const inBranch = isInsideBranch(node, fn.decl);
+    const decision = getEnclosingDecision(node, fn.decl);
 
     if (isAnthropicMessagesCall(node)) {
       const callNode = buildLlmCallNode(node, fn, ctx);
@@ -497,13 +508,20 @@ function analyzeFunctionBody(
         source: fn.id,
         target: callNode.id,
         kind: "calls",
-        meta: { inLoop, inBranch, order, awaited: isAwaited(node) },
+        meta: {
+          inLoop,
+          inBranch,
+          order,
+          awaited: isAwaited(node),
+          branchKey: decision?.key,
+          branchArm: decision?.arm,
+        },
       });
       const meta = callNode.meta;
       if (meta) {
         meta.inLoop = inLoop;
         for (const toolName of meta.toolNames ?? []) {
-          const toolId = `tool:${toolName}`;
+          const toolId = `tool:${fn.filePathRel}:${toolName}`;
           if (!nodes.has(toolId)) {
             const defText = ctx.toolDefs.get(toolName);
             const snip = defText ? snippetFromText(defText) : undefined;
@@ -537,7 +555,14 @@ function analyzeFunctionBody(
         source: fn.id,
         target: target.id,
         kind: "calls",
-        meta: { inLoop, inBranch, order, awaited: isAwaited(node) },
+        meta: {
+          inLoop,
+          inBranch,
+          order,
+          awaited: isAwaited(node),
+          branchKey: decision?.key,
+          branchArm: decision?.arm,
+        },
       });
       order++;
     }
@@ -579,6 +604,35 @@ function isInsideLoop(node: Node, stopAt: Node): boolean {
     cur = cur.getParent();
   }
   return false;
+}
+
+function getEnclosingDecision(
+  call: Node,
+  stopAt: Node,
+): { key: string; arm: string } | undefined {
+  let cur: Node | undefined = call;
+  while (cur && cur !== stopAt) {
+    const parent = cur.getParent();
+    if (!parent) break;
+    if (Node.isIfStatement(parent)) {
+      const arm = parent.getThenStatement() === cur ? "then" : "else";
+      return { key: `if@${parent.getStartLineNumber()}`, arm };
+    }
+    if (Node.isCaseClause(parent)) {
+      const expr = parent.getExpression();
+      const exprText = expr ? expr.getText() : "?";
+      const switchAncestor = parent.getFirstAncestorByKind(SyntaxKind.SwitchStatement);
+      const ln = switchAncestor?.getStartLineNumber() ?? parent.getStartLineNumber();
+      return { key: `switch@${ln}`, arm: `case ${exprText}` };
+    }
+    if (Node.isDefaultClause(parent)) {
+      const switchAncestor = parent.getFirstAncestorByKind(SyntaxKind.SwitchStatement);
+      const ln = switchAncestor?.getStartLineNumber() ?? parent.getStartLineNumber();
+      return { key: `switch@${ln}`, arm: "default" };
+    }
+    cur = parent;
+  }
+  return undefined;
 }
 
 function isInsideBranch(node: Node, stopAt: Node): boolean {
@@ -626,9 +680,10 @@ function buildLlmCallNode(call: CallExpression, fn: FnRecord, ctx: AnalyzeContex
     systemPromptResolved: false,
   };
 
+  const resolution: { unresolvedToolsExpr?: Node } = {};
   const args = call.getArguments();
   if (args.length > 0 && Node.isObjectLiteralExpression(args[0])) {
-    extractCallParams(args[0], meta, fn, ctx);
+    extractCallParams(args[0], meta, fn, ctx, resolution);
   } else {
     ctx.diagnostics.push({
       severity: "warn",
@@ -639,6 +694,18 @@ function buildLlmCallNode(call: CallExpression, fn: FnRecord, ctx: AnalyzeContex
 
   const id = `llm:${fn.filePathRel}:${loc.line}:${loc.column}`;
   const label = meta.model ? `LLM: ${meta.model}` : "LLM call";
+
+  meta.containingFnId = fn.id;
+  if (resolution.unresolvedToolsExpr) {
+    meta.toolsResolution = "unresolved";
+    ctx.unresolvedLlmCalls.push({
+      llmNodeId: id,
+      containingFnId: fn.id,
+      toolsExpr: resolution.unresolvedToolsExpr,
+    });
+  } else {
+    meta.toolsResolution = "literal";
+  }
 
   let stmt: Node = call;
   while (true) {
@@ -701,6 +768,7 @@ function extractCallParams(
   meta: NodeMeta,
   fn: FnRecord,
   ctx: AnalyzeContext,
+  resolution: { unresolvedToolsExpr?: Node } = {},
 ): void {
   for (const prop of obj.getProperties()) {
     if (Node.isSpreadAssignment(prop)) {
@@ -770,6 +838,8 @@ function extractCallParams(
           const existing = new Set(meta.toolNames ?? []);
           for (const d of defs) existing.add(d.name);
           meta.toolNames = [...existing];
+        } else {
+          resolution.unresolvedToolsExpr = init;
         }
         break;
       }
@@ -1231,6 +1301,339 @@ function computeSubgraphs(nodes: GraphNode[], edges: GraphEdge[]): Subgraph[] {
   return subgraphs;
 }
 
+interface ToolDependency {
+  paramName: string;
+  propPath?: string;
+  resolve(argNode: Node): { names: string[]; texts: Map<string, string> } | undefined;
+}
+
+function resolvePerCallerTools(
+  ctx: AnalyzeContext,
+  nodes: Map<string, GraphNode>,
+  edges: GraphEdge[],
+): void {
+  for (const item of ctx.unresolvedLlmCalls) {
+    const fn = ctx.fnById.get(item.containingFnId);
+    if (!fn) continue;
+    const dep = detectToolDependency(item.toolsExpr, fn, ctx);
+    if (!dep) continue;
+
+    const params = getParams(fn.decl);
+    const paramIdx = params.findIndex((p) => p.getName() === dep.paramName);
+    if (paramIdx < 0) continue;
+
+    const callerIds = new Set<string>();
+    for (const e of edges) {
+      if (e.kind === "calls" && e.target === fn.id) callerIds.add(e.source);
+    }
+
+    const perCallerNames: Record<string, string[]> = {};
+    const allNames = new Set<string>();
+    const allTexts = new Map<string, string>();
+
+    for (const callerId of callerIds) {
+      const callerFn = ctx.fnById.get(callerId);
+      if (!callerFn) continue;
+      callerFn.decl.forEachDescendant((d) => {
+        if (!Node.isCallExpression(d)) return;
+        const resolved = resolveCallTarget(d, callerFn, ctx);
+        if (resolved?.id !== fn.id) return;
+        const args = d.getArguments();
+        if (args.length <= paramIdx) return;
+        const baseArg = args[paramIdx];
+        const effectiveArg = dep.propPath ? extractObjectProp(baseArg, dep.propPath) : baseArg;
+        if (!effectiveArg) return;
+        const out = dep.resolve(effectiveArg);
+        if (!out) return;
+        perCallerNames[callerId] = out.names;
+        for (const n of out.names) allNames.add(n);
+        for (const [name, text] of out.texts) allTexts.set(name, text);
+      });
+    }
+
+    const llmNode = nodes.get(item.llmNodeId);
+    if (llmNode && llmNode.meta) {
+      llmNode.meta.toolNames = [...allNames];
+      llmNode.meta.toolsResolution = allNames.size > 0 ? "per-caller" : "unresolved";
+      llmNode.meta.perCallerTools = perCallerNames;
+    }
+
+    for (const [name, text] of allTexts) ctx.toolDefs.set(name, text);
+
+    for (const toolName of allNames) {
+      const toolId = `tool:${fn.filePathRel}:${toolName}`;
+      if (!nodes.has(toolId)) {
+        const text = allTexts.get(toolName);
+        const snip = text ? snippetFromText(text) : undefined;
+        nodes.set(toolId, {
+          id: toolId,
+          kind: "tool",
+          label: toolName,
+          meta: {
+            notes: [`Per-caller tool referenced by ${item.llmNodeId}`],
+            codeSnippet: snip?.text,
+            codeTruncated: snip?.truncated,
+          },
+        });
+      }
+      const viaCallers: string[] = [];
+      for (const [callerId, names] of Object.entries(perCallerNames)) {
+        if (names.includes(toolName)) viaCallers.push(callerId);
+      }
+      const edgeId = `e:${item.llmNodeId}->${toolId}#tool`;
+      if (!edges.some((e) => e.id === edgeId)) {
+        edges.push({
+          id: edgeId,
+          source: item.llmNodeId,
+          target: toolId,
+          kind: "uses-tool",
+          meta: { viaCallers },
+        });
+      }
+    }
+  }
+}
+
+function detectToolDependency(
+  expr: Node,
+  fn: FnRecord,
+  ctx: AnalyzeContext,
+): ToolDependency | undefined {
+  let resolved: Node = expr;
+  let safety = 5;
+  while (Node.isIdentifier(resolved) && safety-- > 0) {
+    const decl = findVariableDeclInFn(resolved.getText(), fn);
+    const init = decl?.getInitializer();
+    if (!init) break;
+    resolved = init;
+  }
+  return detectPatternB(resolved, fn, ctx) ?? detectPatternA(resolved, fn, ctx);
+}
+
+function detectPatternA(expr: Node, fn: FnRecord, ctx: AnalyzeContext): ToolDependency | undefined {
+  if (!Node.isCallExpression(expr)) return undefined;
+  const callee = expr.getExpression();
+  if (!Node.isPropertyAccessExpression(callee)) return undefined;
+  if (callee.getName() !== "filter") return undefined;
+
+  const baseExpr = callee.getExpression();
+  if (!Node.isIdentifier(baseExpr)) return undefined;
+
+  const sf = fn.decl.getSourceFile();
+  const arrDecl = sf.getVariableDeclaration(baseExpr.getText());
+  if (!arrDecl) return undefined;
+  let arrInit: Node | undefined = arrDecl.getInitializer();
+  if (arrInit && Node.isAsExpression(arrInit)) arrInit = arrInit.getExpression();
+  if (!arrInit || !Node.isArrayLiteralExpression(arrInit)) return undefined;
+  const allDefs = extractToolDefs(arrInit);
+  if (allDefs.length === 0) return undefined;
+
+  const params = getParams(fn.decl);
+  const paramNames = new Set(params.map((p) => p.getName()));
+  if (paramNames.size === 0) return undefined;
+
+  let paramName: string | undefined;
+  let propPath: string | undefined;
+
+  fn.decl.forEachDescendant((d) => {
+    if (paramName) return;
+    if (!Node.isVariableDeclaration(d)) return;
+    const init = d.getInitializer();
+    if (!init || !Node.isNewExpression(init)) return;
+    if (init.getExpression().getText() !== "Set") return;
+    const newArgs = init.getArguments();
+    if (newArgs.length !== 1) return;
+    const arg = newArgs[0];
+    if (Node.isIdentifier(arg) && paramNames.has(arg.getText())) {
+      paramName = arg.getText();
+    } else if (Node.isPropertyAccessExpression(arg)) {
+      const recv = arg.getExpression();
+      if (Node.isIdentifier(recv) && paramNames.has(recv.getText())) {
+        paramName = recv.getText();
+        propPath = arg.getName();
+      }
+    }
+  });
+
+  if (!paramName) {
+    const cb = expr.getArguments()[0];
+    if (cb) {
+      cb.forEachDescendant((d) => {
+        if (paramName) return;
+        if (Node.isIdentifier(d) && paramNames.has(d.getText())) {
+          paramName = d.getText();
+        } else if (Node.isPropertyAccessExpression(d)) {
+          const recv = d.getExpression();
+          if (Node.isIdentifier(recv) && paramNames.has(recv.getText())) {
+            paramName = recv.getText();
+            propPath = d.getName();
+          }
+        }
+      });
+    }
+  }
+  if (!paramName) return undefined;
+
+  return {
+    paramName,
+    propPath,
+    resolve(argNode) {
+      if (!Node.isArrayLiteralExpression(argNode)) return undefined;
+      const allowed = new Set<string>();
+      for (const el of argNode.getElements()) {
+        if (Node.isStringLiteral(el) || Node.isNoSubstitutionTemplateLiteral(el)) {
+          allowed.add(el.getLiteralValue());
+        }
+      }
+      const names: string[] = [];
+      const texts = new Map<string, string>();
+      for (const def of allDefs) {
+        if (allowed.has(def.name)) {
+          names.push(def.name);
+          texts.set(def.name, def.text);
+        }
+      }
+      return { names, texts };
+    },
+  };
+}
+
+function detectPatternB(expr: Node, fn: FnRecord, ctx: AnalyzeContext): ToolDependency | undefined {
+  if (!Node.isCallExpression(expr)) return undefined;
+  const callee = expr.getExpression();
+  if (!Node.isPropertyAccessExpression(callee)) return undefined;
+  if (callee.getName() !== "map") return undefined;
+
+  let baseExpr: Node = callee.getExpression();
+  let safety = 5;
+  while (Node.isIdentifier(baseExpr) && safety-- > 0) {
+    const decl = findVariableDeclInFn(baseExpr.getText(), fn);
+    const init = decl?.getInitializer();
+    if (!init) break;
+    baseExpr = init;
+  }
+  if (!Node.isElementAccessExpression(baseExpr)) return undefined;
+
+  const regExpr = baseExpr.getExpression();
+  const idxExpr = baseExpr.getArgumentExpression();
+  if (!Node.isIdentifier(regExpr) || !idxExpr) return undefined;
+
+  const params = getParams(fn.decl);
+  const paramNames = new Set(params.map((p) => p.getName()));
+
+  let paramName: string;
+  let propPath: string | undefined;
+  if (Node.isIdentifier(idxExpr)) {
+    if (!paramNames.has(idxExpr.getText())) return undefined;
+    paramName = idxExpr.getText();
+  } else if (Node.isPropertyAccessExpression(idxExpr)) {
+    const recv = idxExpr.getExpression();
+    if (!Node.isIdentifier(recv) || !paramNames.has(recv.getText())) return undefined;
+    paramName = recv.getText();
+    propPath = idxExpr.getName();
+  } else {
+    return undefined;
+  }
+
+  const sf = fn.decl.getSourceFile();
+  const regDecl = sf.getVariableDeclaration(regExpr.getText());
+  if (!regDecl) return undefined;
+  let regInit: Node | undefined = regDecl.getInitializer();
+  if (regInit && Node.isAsExpression(regInit)) regInit = regInit.getExpression();
+  if (!regInit || !Node.isObjectLiteralExpression(regInit)) return undefined;
+  const bundles = regInit;
+
+  const cb = expr.getArguments()[0];
+  let toolsRegName: string | undefined;
+  if (cb && (Node.isArrowFunction(cb) || Node.isFunctionExpression(cb))) {
+    cb.forEachDescendant((d) => {
+      if (toolsRegName) return;
+      if (Node.isElementAccessExpression(d)) {
+        const base = d.getExpression();
+        if (Node.isIdentifier(base)) toolsRegName = base.getText();
+      }
+    });
+  }
+
+  let toolsObj: ObjectLiteralExpression | undefined;
+  if (toolsRegName) {
+    const toolsReg = sf.getVariableDeclaration(toolsRegName);
+    let toolsInit: Node | undefined = toolsReg?.getInitializer();
+    if (toolsInit && Node.isAsExpression(toolsInit)) toolsInit = toolsInit.getExpression();
+    if (toolsInit && Node.isObjectLiteralExpression(toolsInit)) toolsObj = toolsInit;
+  }
+
+  return {
+    paramName,
+    propPath,
+    resolve(argNode) {
+      if (!Node.isStringLiteral(argNode) && !Node.isNoSubstitutionTemplateLiteral(argNode)) {
+        return undefined;
+      }
+      const bundleName = argNode.getLiteralValue();
+      const bundleProp = bundles.getProperty(bundleName);
+      if (!bundleProp || !Node.isPropertyAssignment(bundleProp)) return undefined;
+      let bundleInit: Node | undefined = bundleProp.getInitializer() ?? undefined;
+      if (bundleInit && Node.isAsExpression(bundleInit)) bundleInit = bundleInit.getExpression();
+      if (!bundleInit || !Node.isArrayLiteralExpression(bundleInit)) return undefined;
+
+      const names: string[] = [];
+      const texts = new Map<string, string>();
+      for (const el of bundleInit.getElements()) {
+        if (!Node.isStringLiteral(el) && !Node.isNoSubstitutionTemplateLiteral(el)) continue;
+        const toolName = el.getLiteralValue();
+        names.push(toolName);
+        if (toolsObj) {
+          const toolEntryProp = toolsObj.getProperty(toolName);
+          if (toolEntryProp && Node.isPropertyAssignment(toolEntryProp)) {
+            const toolEntry = toolEntryProp.getInitializer();
+            if (toolEntry && Node.isObjectLiteralExpression(toolEntry)) {
+              const defProp = toolEntry.getProperty("definition");
+              if (defProp && Node.isPropertyAssignment(defProp)) {
+                const defInit = defProp.getInitializer();
+                if (defInit && Node.isObjectLiteralExpression(defInit)) {
+                  texts.set(toolName, defInit.getText());
+                }
+              }
+            }
+          }
+        }
+      }
+      return { names, texts };
+    },
+  };
+}
+
+function findVariableDeclInFn(name: string, fn: FnRecord) {
+  let found: ReturnType<SourceFile["getVariableDeclaration"]>;
+  fn.decl.forEachDescendant((d) => {
+    if (found) return;
+    if (Node.isVariableDeclaration(d) && d.getName() === name) found = d;
+  });
+  if (found) return found;
+  return fn.decl.getSourceFile().getVariableDeclaration(name);
+}
+
+function getParams(decl: Node): ParameterDeclaration[] {
+  if (
+    Node.isFunctionDeclaration(decl) ||
+    Node.isMethodDeclaration(decl) ||
+    Node.isArrowFunction(decl) ||
+    Node.isFunctionExpression(decl) ||
+    Node.isConstructorDeclaration(decl)
+  ) {
+    return decl.getParameters();
+  }
+  return [];
+}
+
+function extractObjectProp(argNode: Node, propName: string): Node | undefined {
+  if (!Node.isObjectLiteralExpression(argNode)) return undefined;
+  const prop = argNode.getProperty(propName);
+  if (!prop || !Node.isPropertyAssignment(prop)) return undefined;
+  return prop.getInitializer() ?? undefined;
+}
+
 function detectToolDispatchers(
   ctx: AnalyzeContext,
   nodes: Map<string, GraphNode>,
@@ -1267,7 +1670,7 @@ function detectToolDispatchers(
           }
         }
         if (handler) {
-          const toolId = `tool:${toolName}`;
+          const toolId = `tool:${fn.filePathRel}:${toolName}`;
           const edgeId = `e:${toolId}->${handler.id}#handles`;
           if (!edges.some((e) => e.id === edgeId)) {
             edges.push({

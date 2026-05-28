@@ -42,7 +42,10 @@ export function NodeView({ data }: NodeProps) {
           <span className="badge badge-info">tpl prompt</span>
         )}
         {node.kind === "llm-call" && (meta.toolNames?.length ?? 0) > 0 && (
-          <span className="badge badge-info">{meta.toolNames!.length} tools</span>
+          <span className="badge badge-info">
+            {meta.toolNames!.length} tools
+            {meta.toolsResolution === "per-caller" ? " · per caller" : ""}
+          </span>
         )}
       </div>
       <Handle type="source" position={Position.Right} style={{ background: "transparent", border: "none" }} />
