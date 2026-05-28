@@ -664,12 +664,31 @@ function buildLlmCallNode(call: CallExpression, fn: FnRecord, ctx: AnalyzeContex
 }
 
 function captureSnippet(node: Node, head = 50, tail = 50): { text: string; truncated: boolean } {
-  return snippetFromText(node.getText(), head, tail);
+  const source = snippetSourceNode(node);
+  const fullText = source.getFullText();
+  const lines = fullText.split(/\r?\n/);
+  while (lines.length > 1 && lines[0].trim() === "") lines.shift();
+  return snippetFromLines(lines, head, tail);
+}
+
+function snippetSourceNode(decl: Node): Node {
+  if (Node.isArrowFunction(decl) || Node.isFunctionExpression(decl)) {
+    const parent = decl.getParent();
+    if (parent && Node.isPropertyDeclaration(parent)) return parent;
+    if (parent && Node.isVariableDeclaration(parent)) {
+      const stmt = parent.getFirstAncestorByKind(SyntaxKind.VariableStatement);
+      return stmt ?? parent;
+    }
+  }
+  return decl;
 }
 
 function snippetFromText(text: string, head = 50, tail = 50): { text: string; truncated: boolean } {
-  const lines = text.split(/\r?\n/);
-  if (lines.length <= head + tail + 1) return { text, truncated: false };
+  return snippetFromLines(text.split(/\r?\n/), head, tail);
+}
+
+function snippetFromLines(lines: string[], head = 50, tail = 50): { text: string; truncated: boolean } {
+  if (lines.length <= head + tail + 1) return { text: lines.join("\n"), truncated: false };
   const middle = `// ... [${lines.length - head - tail} lines truncated] ...`;
   return {
     text: [...lines.slice(0, head), middle, ...lines.slice(-tail)].join("\n"),
