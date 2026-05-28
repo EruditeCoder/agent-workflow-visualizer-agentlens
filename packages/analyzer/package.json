@@ -1,0 +1,20 @@
+{
+  "name": "@awv/analyzer",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/analyze.js",
+  "bin": {
+    "awv-analyze": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@awv/shared": "*",
+    "ts-morph": "^24.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "agent-workflow-visualizer",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Static analyzer + canvas viewer for Anthropic TypeScript agent codebases. Visualizes LLM call graphs across entry points before any tokens are spent.",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "analyze:examples": "npm run -w @awv/analyzer build && node packages/analyzer/dist/cli.js examples --out viewer-data/graph.json",
+    "viewer": "npm run -w @awv/viewer dev",
+    "demo": "npm run analyze:examples && npm run viewer"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
