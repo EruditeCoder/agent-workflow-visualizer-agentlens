@@ -69,6 +69,7 @@ interface AnalyzeContext {
   diagnostics: AnalyzerDiagnostic[];
   routeIdx: number;
   routerPrefixes: Map<string, string>;
+  toolDefs: Map<string, string>;
 }
 
 interface AnalyzeOptions {
@@ -109,6 +110,7 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
     diagnostics: [],
     routeIdx: 0,
     routerPrefixes: new Map(),
+    toolDefs: new Map(),
   };
 
   for (const sf of project.getSourceFiles()) {
@@ -128,6 +130,7 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
   const edges: GraphEdge[] = [];
 
   for (const fn of ctx.fnById.values()) {
+    const snippet = captureSnippet(fn.decl);
     nodes.set(fn.id, {
       id: fn.id,
       kind: fn.isExported || fn.isRouteHandler ? "entry" : "function",
@@ -136,6 +139,9 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
       meta: {
         isAsync: fn.isAsync,
         signature: fn.signature,
+        className: fn.className,
+        codeSnippet: snippet.text,
+        codeTruncated: snippet.truncated,
       },
     });
   }
@@ -499,11 +505,17 @@ function analyzeFunctionBody(
         for (const toolName of meta.toolNames ?? []) {
           const toolId = `tool:${toolName}`;
           if (!nodes.has(toolId)) {
+            const defText = ctx.toolDefs.get(toolName);
+            const snip = defText ? snippetFromText(defText) : undefined;
             nodes.set(toolId, {
               id: toolId,
               kind: "tool",
               label: toolName,
-              meta: { notes: [`Tool definition referenced by ${callNode.id}`] },
+              meta: {
+                notes: [`Tool definition referenced by ${callNode.id}`],
+                codeSnippet: snip?.text,
+                codeTruncated: snip?.truncated,
+              },
             });
           }
           edges.push({
@@ -627,7 +639,42 @@ function buildLlmCallNode(call: CallExpression, fn: FnRecord, ctx: AnalyzeContex
 
   const id = `llm:${fn.filePathRel}:${loc.line}:${loc.column}`;
   const label = meta.model ? `LLM: ${meta.model}` : "LLM call";
+
+  let stmt: Node = call;
+  while (true) {
+    const p = stmt.getParent();
+    if (!p) break;
+    if (
+      Node.isBlock(p) ||
+      Node.isSourceFile(p) ||
+      Node.isCaseClause(p) ||
+      Node.isDefaultClause(p) ||
+      Node.isModuleBlock(p)
+    ) {
+      break;
+    }
+    stmt = p;
+  }
+  const snippet = captureSnippet(stmt);
+  meta.codeSnippet = snippet.text;
+  meta.codeTruncated = snippet.truncated;
+  meta.className = fn.className;
+
   return { id, kind: "llm-call", label, loc, meta };
+}
+
+function captureSnippet(node: Node, head = 50, tail = 50): { text: string; truncated: boolean } {
+  return snippetFromText(node.getText(), head, tail);
+}
+
+function snippetFromText(text: string, head = 50, tail = 50): { text: string; truncated: boolean } {
+  const lines = text.split(/\r?\n/);
+  if (lines.length <= head + tail + 1) return { text, truncated: false };
+  const middle = `// ... [${lines.length - head - tail} lines truncated] ...`;
+  return {
+    text: [...lines.slice(0, head), middle, ...lines.slice(-tail)].join("\n"),
+    truncated: true,
+  };
 }
 
 function extractCallParams(
@@ -699,8 +746,10 @@ function extractCallParams(
       case "tools": {
         const arr = resolveToArrayLiteral(init, fn, ctx);
         if (arr) {
+          const defs = extractToolDefs(arr);
+          for (const d of defs) ctx.toolDefs.set(d.name, d.text);
           const existing = new Set(meta.toolNames ?? []);
-          for (const n of extractToolNames(arr)) existing.add(n);
+          for (const d of defs) existing.add(d.name);
           meta.toolNames = [...existing];
         }
         break;
@@ -820,18 +869,22 @@ function resolveToArrayLiteral(
 }
 
 function extractToolNames(arr: ArrayLiteralExpression): string[] {
-  const names: string[] = [];
+  return extractToolDefs(arr).map((t) => t.name);
+}
+
+function extractToolDefs(arr: ArrayLiteralExpression): Array<{ name: string; text: string }> {
+  const out: Array<{ name: string; text: string }> = [];
   for (const el of arr.getElements()) {
     if (!Node.isObjectLiteralExpression(el)) continue;
     const nameProp = el.getProperty("name");
     if (nameProp && Node.isPropertyAssignment(nameProp)) {
       const init = nameProp.getInitializer();
       if (init && (Node.isStringLiteral(init) || Node.isNoSubstitutionTemplateLiteral(init))) {
-        names.push(init.getLiteralValue());
+        out.push({ name: init.getLiteralValue(), text: el.getText() });
       }
     }
   }
-  return names;
+  return out;
 }
 
 function resolveCallTarget(

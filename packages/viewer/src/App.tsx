@@ -12,6 +12,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<ViewMode>("canvas");
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     fetch("/graph.json")
@@ -28,10 +29,16 @@ export function App() {
     return graph.nodes.find((n) => n.id === selectedId) ?? null;
   }, [graph, selectedId]);
 
+  const handleSelect = (id: string | null): void => {
+    setSelectedId(id);
+  };
+
   if (error) {
     return (
       <div className="app">
-        <div className="topbar"><h1>agent-workflow-visualizer</h1></div>
+        <div className="topbar">
+          <h1>agent-workflow-visualizer</h1>
+        </div>
         <div style={{ padding: 24 }}>
           <h2>Could not load graph</h2>
           <p style={{ color: "var(--fg-dim)" }}>{error}</p>
@@ -44,7 +51,9 @@ export function App() {
   if (!graph) {
     return (
       <div className="app">
-        <div className="topbar"><h1>agent-workflow-visualizer</h1></div>
+        <div className="topbar">
+          <h1>agent-workflow-visualizer</h1>
+        </div>
         <div style={{ padding: 24, color: "var(--fg-dim)" }}>Loading graph...</div>
       </div>
     );
@@ -55,31 +64,38 @@ export function App() {
       <div className="topbar">
         <h1>agent-workflow-visualizer</h1>
         <span className="meta">
-          {graph.nodes.length} nodes · {graph.edges.length} edges · {graph.subgraphs.length} subgraph{graph.subgraphs.length === 1 ? "" : "s"}
+          {graph.nodes.length} nodes · {graph.edges.length} edges · {graph.subgraphs.length} subgraph
+          {graph.subgraphs.length === 1 ? "" : "s"}
         </span>
+        <input
+          type="search"
+          placeholder="filter nodes..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="search-input"
+        />
         <div className="spacer" />
-        <button
-          className={mode === "canvas" ? "active" : ""}
-          onClick={() => setMode("canvas")}
-        >
+        <button className={mode === "canvas" ? "active" : ""} onClick={() => setMode("canvas")}>
           Canvas
         </button>
-        <button
-          className={mode === "timeline" ? "active" : ""}
-          onClick={() => setMode("timeline")}
-        >
+        <button className={mode === "timeline" ? "active" : ""} onClick={() => setMode("timeline")}>
           Structural Timeline
         </button>
       </div>
       <div className="workspace">
         {mode === "canvas" ? (
           <ReactFlowProvider>
-            <Canvas graph={graph} selectedId={selectedId} onSelect={setSelectedId} />
+            <Canvas
+              graph={graph}
+              selectedId={selectedId}
+              onSelect={handleSelect}
+              filter={search.trim().toLowerCase()}
+            />
           </ReactFlowProvider>
         ) : (
-          <TimelineView graph={graph} selectedId={selectedId} onSelect={setSelectedId} />
+          <TimelineView graph={graph} selectedId={selectedId} onSelect={handleSelect} />
         )}
-        <Inspector graph={graph} selected={selected} />
+        <Inspector graph={graph} selected={selected} onSelect={handleSelect} />
       </div>
     </div>
   );

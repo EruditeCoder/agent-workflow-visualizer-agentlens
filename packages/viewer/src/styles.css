@@ -51,6 +51,19 @@ body { background: var(--bg); color: var(--fg); }
 }
 .topbar button.active { background: var(--accent); color: #08111c; border-color: var(--accent); }
 .topbar button:hover:not(.active) { background: #21262d; }
+.topbar .search-input {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  width: 220px;
+}
+.topbar .search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 
 .workspace {
   display: grid;
@@ -136,6 +149,50 @@ body { background: var(--bg); color: var(--fg); }
   min-width: 100px;
 }
 .node-card.tool .title { color: var(--fg-dim); font-size: 11px; }
+.node-card.dim {
+  opacity: 0.18;
+  filter: grayscale(0.5);
+}
+
+.inspector .edge-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+.inspector .edge-list li {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.inspector .edge-list li:last-child { border-bottom: none; }
+.inspector .edge-link {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.inspector .edge-link:hover { text-decoration: underline; }
+.inspector .edge-kind {
+  font-size: 10px;
+  color: var(--fg-dim);
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  text-transform: lowercase;
+}
+
+.code-snippet {
+  font-family: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  background: #0a0e14;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  max-height: 480px;
+  overflow: auto;
+  white-space: pre;
+  word-break: normal;
+}
 
 .subgraph-label {
   position: absolute;

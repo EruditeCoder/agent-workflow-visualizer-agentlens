@@ -15,18 +15,25 @@ interface Props {
   graph: Graph;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  filter?: string;
 }
 
 const nodeTypes = { awv: NodeView };
 
-export function Canvas({ graph, selectedId, onSelect }: Props) {
+export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
   const { rfNodes, rfEdges, bounds } = useMemo(() => {
     const laid = layoutGraph(graph);
+    const matchSet = new Set<string>();
+    if (filter) {
+      for (const n of laid.nodes) {
+        if (n.node.label.toLowerCase().includes(filter)) matchSet.add(n.id);
+      }
+    }
     const rfNodes: RFNode[] = laid.nodes.map((n) => ({
       id: n.id,
       type: "awv",
       position: { x: n.x, y: n.y },
-      data: { node: n.node },
+      data: { node: n.node, dim: filter ? !matchSet.has(n.id) : false },
       selected: n.id === selectedId,
       draggable: true,
     }));
@@ -58,7 +65,7 @@ export function Canvas({ graph, selectedId, onSelect }: Props) {
       };
     });
     return { rfNodes, rfEdges, bounds: laid.subgraphBounds };
-  }, [graph, selectedId]);
+  }, [graph, selectedId, filter]);
 
   return (
     <div className="canvas-wrap">

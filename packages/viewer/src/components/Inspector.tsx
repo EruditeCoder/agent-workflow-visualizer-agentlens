@@ -1,11 +1,57 @@
+import { useMemo } from "react";
 import type { Graph, GraphNode } from "@awv/shared";
 
 interface Props {
   graph: Graph;
   selected: GraphNode | null;
+  onSelect: (id: string) => void;
 }
 
-export function Inspector({ graph, selected }: Props) {
+interface EdgeRef {
+  edgeId: string;
+  otherId: string;
+  otherLabel: string;
+  kind: string;
+  inLoop?: boolean;
+  inBranch?: boolean;
+}
+
+export function Inspector({ graph, selected, onSelect }: Props) {
+  const edgeLists = useMemo(() => {
+    if (!selected) return { incoming: [] as EdgeRef[], outgoing: [] as EdgeRef[] };
+    const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+    const incoming: EdgeRef[] = [];
+    const outgoing: EdgeRef[] = [];
+    for (const e of graph.edges) {
+      if (e.source === selected.id) {
+        const o = byId.get(e.target);
+        if (o) {
+          outgoing.push({
+            edgeId: e.id,
+            otherId: o.id,
+            otherLabel: o.label,
+            kind: e.kind,
+            inLoop: e.meta?.inLoop,
+            inBranch: e.meta?.inBranch,
+          });
+        }
+      } else if (e.target === selected.id) {
+        const o = byId.get(e.source);
+        if (o) {
+          incoming.push({
+            edgeId: e.id,
+            otherId: o.id,
+            otherLabel: o.label,
+            kind: e.kind,
+            inLoop: e.meta?.inLoop,
+            inBranch: e.meta?.inBranch,
+          });
+        }
+      }
+    }
+    return { incoming, outgoing };
+  }, [graph, selected]);
+
   if (!selected) {
     return (
       <aside className="inspector">
@@ -15,7 +61,9 @@ export function Inspector({ graph, selected }: Props) {
           <div style={{ fontSize: 11 }}>
             <div>{graph.nodes.length} nodes</div>
             <div>{graph.edges.length} edges</div>
-            <div>{graph.subgraphs.length} disconnected subgraph{graph.subgraphs.length === 1 ? "" : "s"}</div>
+            <div>
+              {graph.subgraphs.length} disconnected subgraph{graph.subgraphs.length === 1 ? "" : "s"}
+            </div>
             <div style={{ marginTop: 8 }}>Root: {graph.rootDir}</div>
             <div>Generated: {new Date(graph.generatedAt).toLocaleString()}</div>
           </div>
@@ -24,7 +72,9 @@ export function Inspector({ graph, selected }: Props) {
               <h2 style={{ marginTop: 16 }}>Diagnostics</h2>
               <ul style={{ paddingLeft: 16, margin: 0, color: "var(--fg-dim)" }}>
                 {graph.diagnostics.map((d, i) => (
-                  <li key={i}>[{d.severity}] {d.message}</li>
+                  <li key={i}>
+                    [{d.severity}] {d.message}
+                  </li>
                 ))}
               </ul>
             </>
@@ -53,14 +103,18 @@ export function Inspector({ graph, selected }: Props) {
           <>
             <dt>Location</dt>
             <dd>
-              <code>{relPath(selected.loc.file, graph.rootDir)}:{selected.loc.line}</code>
+              <code>
+                {relPath(selected.loc.file, graph.rootDir)}:{selected.loc.line}
+              </code>
             </dd>
           </>
         )}
         {meta.model && (
           <>
             <dt>Model</dt>
-            <dd><code>{meta.model}</code></dd>
+            <dd>
+              <code>{meta.model}</code>
+            </dd>
           </>
         )}
         {meta.maxTokens !== undefined && (
@@ -81,10 +135,20 @@ export function Inspector({ graph, selected }: Props) {
             <dd>{meta.isAsync ? "yes" : "no"}</dd>
           </>
         )}
+        {meta.className && (
+          <>
+            <dt>Class</dt>
+            <dd>
+              <code>{meta.className}</code>
+            </dd>
+          </>
+        )}
         {meta.signature && (
           <>
             <dt>Signature</dt>
-            <dd><code style={{ fontSize: 11 }}>{meta.signature}</code></dd>
+            <dd>
+              <code style={{ fontSize: 11 }}>{meta.signature}</code>
+            </dd>
           </>
         )}
       </dl>
@@ -101,9 +165,48 @@ export function Inspector({ graph, selected }: Props) {
           <h2>Tools</h2>
           <ul style={{ paddingLeft: 16 }}>
             {meta.toolNames.map((t) => (
-              <li key={t}><code>{t}</code></li>
+              <li key={t}>
+                <a className="edge-link" onClick={() => onSelect(`tool:${t}`)}>
+                  <code>{t}</code>
+                </a>
+              </li>
             ))}
           </ul>
+        </>
+      )}
+
+      {(edgeLists.incoming.length > 0 || edgeLists.outgoing.length > 0) && (
+        <>
+          {edgeLists.incoming.length > 0 && (
+            <>
+              <h2>Called by ({edgeLists.incoming.length})</h2>
+              <ul className="edge-list">
+                {edgeLists.incoming.map((e) => (
+                  <li key={e.edgeId}>
+                    <a className="edge-link" onClick={() => onSelect(e.otherId)}>
+                      {e.otherLabel}
+                    </a>
+                    {edgeBadges(e)}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {edgeLists.outgoing.length > 0 && (
+            <>
+              <h2>Calls ({edgeLists.outgoing.length})</h2>
+              <ul className="edge-list">
+                {edgeLists.outgoing.map((e) => (
+                  <li key={e.edgeId}>
+                    <a className="edge-link" onClick={() => onSelect(e.otherId)}>
+                      {e.otherLabel}
+                    </a>
+                    {edgeBadges(e)}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </>
       )}
 
@@ -117,7 +220,26 @@ export function Inspector({ graph, selected }: Props) {
           </ul>
         </>
       )}
+
+      {meta.codeSnippet && (
+        <>
+          <h2>
+            Source{meta.codeTruncated ? " (truncated)" : ""}
+          </h2>
+          <pre className="code-snippet">{meta.codeSnippet}</pre>
+        </>
+      )}
     </aside>
+  );
+}
+
+function edgeBadges(e: EdgeRef): JSX.Element {
+  return (
+    <span style={{ marginLeft: 6 }}>
+      {e.kind !== "calls" && <span className="edge-kind">{e.kind}</span>}
+      {e.inLoop && <span className="badge badge-warn" style={{ marginLeft: 4 }}>loop</span>}
+      {e.inBranch && !e.inLoop && <span className="badge badge-info" style={{ marginLeft: 4 }}>branch</span>}
+    </span>
   );
 }
 

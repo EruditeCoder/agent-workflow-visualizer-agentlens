@@ -33,6 +33,9 @@ export interface NodeMeta {
   isAsync?: boolean;
   signature?: string;
   notes?: string[];
+  codeSnippet?: string;
+  codeTruncated?: boolean;
+  className?: string;
 }
 
 export type EdgeKind =
