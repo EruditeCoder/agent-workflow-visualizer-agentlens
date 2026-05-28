@@ -160,7 +160,9 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
 
   resolvePerCallerTools(ctx, nodes, edges);
 
-  detectToolDispatchers(ctx, nodes, edges);
+  const handlerEdges = detectToolDispatchers(ctx, nodes, edges);
+
+  mergeToolHandlers(nodes, edges, handlerEdges);
 
   attachRecursionFlags(nodes, edges);
 
@@ -957,10 +959,6 @@ function resolveToArrayLiteral(
   return undefined;
 }
 
-function extractToolNames(arr: ArrayLiteralExpression): string[] {
-  return extractToolDefs(arr).map((t) => t.name);
-}
-
 function extractToolDefs(arr: ArrayLiteralExpression): Array<{ name: string; text: string }> {
   const out: Array<{ name: string; text: string }> = [];
   for (const el of arr.getElements()) {
@@ -1638,9 +1636,10 @@ function detectToolDispatchers(
   ctx: AnalyzeContext,
   nodes: Map<string, GraphNode>,
   edges: GraphEdge[],
-): void {
+): GraphEdge[] {
+  const created: GraphEdge[] = [];
   const toolNodes = [...nodes.values()].filter((n) => n.kind === "tool");
-  if (toolNodes.length === 0) return;
+  if (toolNodes.length === 0) return created;
   const toolNamesInGraph = new Set(toolNodes.map((t) => t.label));
 
   for (const fn of ctx.fnById.values()) {
@@ -1673,17 +1672,90 @@ function detectToolDispatchers(
           const toolId = `tool:${fn.filePathRel}:${toolName}`;
           const edgeId = `e:${toolId}->${handler.id}#handles`;
           if (!edges.some((e) => e.id === edgeId)) {
-            edges.push({
+            const edge: GraphEdge = {
               id: edgeId,
               source: toolId,
               target: handler.id,
               kind: "handles-tool",
-            });
+            };
+            edges.push(edge);
+            created.push(edge);
           }
         }
       }
     });
   }
+  return created;
+}
+
+/**
+ * A tool definition and its dispatch handler are 1:1 in practice, so showing
+ * them as two nodes joined by a "handles" edge doubles the node count for no
+ * extra information. This folds each handler into its tool node: the handler's
+ * source/signature is carried in `meta.handler`, the handler's other edges are
+ * rewired onto the tool node, and the handler node + handles-tool edge are
+ * dropped. The tool node inherits the handler's location so it stays navigable.
+ */
+function mergeToolHandlers(
+  nodes: Map<string, GraphNode>,
+  edges: GraphEdge[],
+  handlerEdges: GraphEdge[],
+): void {
+  if (handlerEdges.length === 0) return;
+  // handler fn id -> tool node id
+  const handlerToTool = new Map<string, string>();
+  const removedHandlerIds = new Set<string>();
+  const droppedEdgeIds = new Set<string>();
+
+  for (const he of handlerEdges) {
+    const toolId = he.source;
+    const handlerId = he.target;
+    const tool = nodes.get(toolId);
+    const handler = nodes.get(handlerId);
+    if (!tool || !handler) continue;
+    handlerToTool.set(handlerId, toolId);
+    removedHandlerIds.add(handlerId);
+    droppedEdgeIds.add(he.id);
+
+    const hMeta = handler.meta ?? {};
+    tool.meta = tool.meta ?? {};
+    tool.meta.handler = {
+      fnId: handlerId,
+      label: handler.label,
+      signature: hMeta.signature,
+      loc: handler.loc,
+      codeSnippet: hMeta.codeSnippet,
+      codeTruncated: hMeta.codeTruncated,
+      isAsync: hMeta.isAsync,
+    };
+    // Make the tool node navigable to the actual implementation.
+    if (!tool.loc && handler.loc) tool.loc = handler.loc;
+    if (hMeta.className && !tool.meta.className) tool.meta.className = hMeta.className;
+  }
+
+  // Rewire every edge that touched a handler so it points at the tool instead.
+  for (const e of edges) {
+    if (droppedEdgeIds.has(e.id)) continue;
+    const newSource = handlerToTool.get(e.source);
+    const newTarget = handlerToTool.get(e.target);
+    if (newSource) e.source = newSource;
+    if (newTarget) e.target = newTarget;
+  }
+
+  // Drop handler nodes and the handles-tool edges; dedupe collapsed parallels.
+  for (const id of removedHandlerIds) nodes.delete(id);
+  const seen = new Set<string>();
+  const kept: GraphEdge[] = [];
+  for (const e of edges) {
+    if (droppedEdgeIds.has(e.id)) continue;
+    if (e.source === e.target) continue; // self-loops created by folding
+    const key = `${e.source}->${e.target}#${e.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(e);
+  }
+  edges.length = 0;
+  edges.push(...kept);
 }
 
 function attachRecursionFlags(nodes: Map<string, GraphNode>, edges: GraphEdge[]): void {

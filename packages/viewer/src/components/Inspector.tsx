@@ -153,6 +153,41 @@ export function Inspector({ graph, selected, onSelect }: Props) {
         )}
       </dl>
 
+      {meta.handler && (
+        <>
+          <h2>Handler</h2>
+          <dl style={{ marginTop: 4 }}>
+            <dt>Function</dt>
+            <dd>
+              <code>{meta.handler.label}</code>
+              {meta.handler.isAsync ? <span className="kind" style={{ marginLeft: 6 }}>async</span> : null}
+            </dd>
+            {meta.handler.loc && (
+              <>
+                <dt>Defined</dt>
+                <dd>
+                  <code>{relPath(meta.handler.loc.file, graph.rootDir)}:{meta.handler.loc.line}</code>
+                </dd>
+              </>
+            )}
+            {meta.handler.signature && (
+              <>
+                <dt>Signature</dt>
+                <dd>
+                  <code style={{ fontSize: 11 }}>{meta.handler.signature}</code>
+                </dd>
+              </>
+            )}
+          </dl>
+          {meta.handler.codeSnippet && (
+            <>
+              <h2>Handler source{meta.handler.codeTruncated ? " (truncated)" : ""}</h2>
+              <pre className="code-snippet">{meta.handler.codeSnippet}</pre>
+            </>
+          )}
+        </>
+      )}
+
       {meta.systemPrompt && (
         <>
           <h2>System prompt</h2>
@@ -258,7 +293,8 @@ export function Inspector({ graph, selected, onSelect }: Props) {
       {meta.codeSnippet && (
         <>
           <h2>
-            Source{meta.codeTruncated ? " (truncated)" : ""}
+            {selected.kind === "tool" ? "Tool definition" : "Source"}
+            {meta.codeTruncated ? " (truncated)" : ""}
           </h2>
           <pre className="code-snippet">{meta.codeSnippet}</pre>
         </>

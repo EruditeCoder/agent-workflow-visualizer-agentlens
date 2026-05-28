@@ -1,15 +1,17 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ReactFlow,
   Background,
   Controls,
   MiniMap,
+  useViewport,
   type Node as RFNode,
   type Edge as RFEdge,
 } from "@xyflow/react";
 import type { Graph, GraphNode } from "@awv/shared";
-import { layoutGraph } from "../lib/layout.js";
+import { layoutGraph, type LayoutEdge } from "../lib/layout.js";
 import { NodeView } from "./NodeView.js";
+import { Legend } from "./Legend.js";
 
 interface Props {
   graph: Graph;
@@ -20,72 +22,101 @@ interface Props {
 
 const nodeTypes = { awv: NodeView };
 
+const EDGE_COLOR: Record<string, string> = {
+  "uses-tool": "#a371f7",
+  "handles-tool": "#a371f7",
+  calls: "#58a6ff",
+  loop: "#f0883e",
+  branch: "#6e7681",
+};
+
+function miniMapColor(n: RFNode): string {
+  const kind = (n.data as { node?: GraphNode })?.node?.kind;
+  switch (kind) {
+    case "entry": return "#58a6ff";
+    case "llm-call": return "#7ee787";
+    case "tool": return "#a371f7";
+    case "tool-group": return "#a371f7";
+    default: return "#484f58";
+  }
+}
+
 export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
+  const expandAll = typeof window !== "undefined" && window.location.search.includes("expand=all");
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+  const toggleGroup = useCallback((id: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }, []);
+
   const { rfNodes, rfEdges, bounds } = useMemo(() => {
-    const laid = layoutGraph(graph);
+    // Filter matches (also drives force-expand of groups containing a hit).
     const matchSet = new Set<string>();
+    const toolMatches = new Set<string>();
     if (filter) {
-      for (const n of laid.nodes) {
-        if (n.node.label.toLowerCase().includes(filter)) matchSet.add(n.id);
+      for (const n of graph.nodes) {
+        if (n.label.toLowerCase().includes(filter)) {
+          matchSet.add(n.id);
+          if (n.kind === "tool") toolMatches.add(n.id);
+        }
       }
     }
-    const reachableFromSelected = computeReachableForward(graph, selectedId);
-    const rfNodes: RFNode[] = laid.nodes.map((n) => ({
-      id: n.id,
-      type: "awv",
-      position: { x: n.x, y: n.y },
-      data: { node: n.node, dim: filter ? !matchSet.has(n.id) : false },
-      selected: n.id === selectedId,
-      draggable: true,
-    }));
-    const exclusionInfo = computeExclusionGroups(laid.edges);
-    const rfEdges: RFEdge[] = laid.edges.map((e) => {
-      const isLoop = !!e.meta?.inLoop;
-      const isBranch = !!e.meta?.inBranch;
-      const excl = exclusionInfo.get(e.id);
-      const dashed = e.kind === "uses-tool" || e.kind === "handles-tool" || isLoop || isBranch;
-      let color: string;
-      if (e.kind === "uses-tool") color = "#8b949e";
-      else if (e.kind === "handles-tool") color = "#a371f7";
-      else if (excl) color = "#6e7681";
-      else if (isLoop) color = "#f0883e";
-      else color = "#58a6ff";
-      let label: string | undefined;
-      if (e.kind === "uses-tool") label = undefined;
-      else if (e.kind === "handles-tool") label = "handles";
-      else if (excl) label = excl.armLabel;
-      else if (isLoop) label = "loop";
 
-      let opacity = 1;
-      if (
-        e.kind === "uses-tool" &&
-        e.meta?.viaCallers &&
-        e.meta.viaCallers.length > 0 &&
-        selectedId &&
-        selectedId !== e.source &&
-        selectedId !== e.target
-      ) {
-        const anyMatch = e.meta.viaCallers.some((c) => reachableFromSelected.has(c));
-        if (!anyMatch) opacity = 0.15;
+    const laid = layoutGraph(graph, { expandedGroups, toolMatches, expandAll });
+
+    // toolId -> groupId, so selecting a chip focuses its group's edges.
+    const toolToGroup = new Map<string, string>();
+    for (const g of laid.groups.values()) for (const m of g.members) toolToGroup.set(m.id, g.id);
+    const effectiveSel = selectedId ? toolToGroup.get(selectedId) ?? selectedId : null;
+
+    // 1-hop neighborhood over the rendered (aggregated) edge graph.
+    const neighborhood = new Set<string>();
+    if (effectiveSel) {
+      neighborhood.add(effectiveSel);
+      for (const e of laid.edges) {
+        if (e.source === effectiveSel) neighborhood.add(e.target);
+        if (e.target === effectiveSel) neighborhood.add(e.source);
       }
+    }
+
+    const dimNode = (id: string, isGroup: boolean, members: GraphNode[]): boolean => {
+      if (effectiveSel && !neighborhood.has(id)) return true;
+      if (filter) {
+        if (isGroup) return !members.some((m) => matchSet.has(m.id));
+        return !matchSet.has(id);
+      }
+      return false;
+    };
+
+    const rfNodes: RFNode[] = laid.nodes.map((n) => {
+      const isGroup = n.node.kind === "tool-group";
+      const group = isGroup ? laid.groups.get(n.id) : undefined;
       return {
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        animated: e.kind === "calls" && isLoop && !excl,
-        label,
-        labelStyle: { fontSize: 10, fill: color, fontStyle: excl ? "italic" : "normal" },
-        labelBgStyle: { fill: "#161b22" },
-        style: {
-          stroke: color,
-          strokeDasharray: dashed ? "4 3" : undefined,
-          strokeWidth: 1.2,
-          opacity,
+        id: n.id,
+        type: "awv",
+        position: { x: n.x, y: n.y },
+        data: {
+          node: n.node,
+          dim: dimNode(n.id, isGroup, group?.members ?? []),
+          group,
+          selectedId,
+          toolMatches,
+          onToggleGroup: toggleGroup,
+          onSelectTool: onSelect,
         },
+        selected: n.id === selectedId,
+        draggable: true,
       };
     });
+
+    const rfEdges: RFEdge[] = laid.edges.map((e) => edgeToRF(e, effectiveSel, neighborhood));
+
     return { rfNodes, rfEdges, bounds: laid.subgraphBounds };
-  }, [graph, selectedId, filter]);
+  }, [graph, selectedId, filter, expandedGroups, expandAll, toggleGroup, onSelect]);
 
   return (
     <div className="canvas-wrap">
@@ -94,73 +125,95 @@ export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
         edges={rfEdges}
         nodeTypes={nodeTypes}
         fitView
+        minZoom={0.1}
         proOptions={{ hideAttribution: true }}
         onPaneClick={() => onSelect(null)}
-        onNodeClick={(_, n) => onSelect(n.id)}
+        onNodeClick={(_, n) => {
+          if ((n.data as { node?: GraphNode })?.node?.kind !== "tool-group") onSelect(n.id);
+        }}
       >
         <Background gap={20} size={1} color="#21262d" />
         <Controls position="bottom-left" />
-        <MiniMap pannable zoomable maskColor="rgba(13,17,23,0.7)" />
+        <MiniMap
+          pannable
+          zoomable
+          nodeColor={miniMapColor}
+          nodeStrokeWidth={0}
+          maskColor="rgba(1,4,9,0.78)"
+          style={{ backgroundColor: "#0d1117", border: "1px solid #30363d" }}
+        />
+        <SubgraphLabels bounds={bounds} />
       </ReactFlow>
+      <Legend />
+    </div>
+  );
+}
+
+/** Floating subgraph titles that track the pane's pan/zoom transform. */
+function SubgraphLabels({ bounds }: { bounds: Map<string, { x: number; y: number; label: string }> }) {
+  const { x, y, zoom } = useViewport();
+  return (
+    <>
       {[...bounds.entries()].map(([id, b]) => (
         <div
           key={id}
           className="subgraph-label"
           style={{
-            transform: `translate(${b.x}px, ${b.y - 26}px)`,
+            transform: `translate(${b.x * zoom + x}px, ${(b.y - 30) * zoom + y}px)`,
             position: "absolute",
+            top: 0,
+            left: 0,
             pointerEvents: "none",
+            zIndex: 4,
           }}
+          title={b.label}
         >
           {b.label}
         </div>
       ))}
-    </div>
+    </>
   );
 }
 
-function computeReachableForward(graph: Graph, selectedId: string | null): Set<string> {
-  if (!selectedId) return new Set();
-  const out = new Map<string, string[]>();
-  for (const e of graph.edges) {
-    if (e.kind !== "calls") continue;
-    if (!out.has(e.source)) out.set(e.source, []);
-    out.get(e.source)!.push(e.target);
-  }
-  const seen = new Set<string>([selectedId]);
-  const stack = [selectedId];
-  while (stack.length) {
-    const n = stack.pop()!;
-    for (const next of out.get(n) ?? []) {
-      if (!seen.has(next)) {
-        seen.add(next);
-        stack.push(next);
-      }
-    }
-  }
-  return seen;
-}
+function edgeToRF(e: LayoutEdge, effectiveSel: string | null, neighborhood: Set<string>): RFEdge {
+  const isLoop = !!e.meta?.inLoop;
+  const isBranch = !!e.meta?.inBranch;
+  const dashed = e.kind === "uses-tool" || e.kind === "handles-tool" || isLoop || isBranch;
 
-function computeExclusionGroups(edges: import("@awv/shared").GraphEdge[]): Map<string, { groupSize: number; armLabel: string }> {
-  const out = new Map<string, { groupSize: number; armLabel: string }>();
-  const bySourceKey = new Map<string, import("@awv/shared").GraphEdge[]>();
-  for (const e of edges) {
-    if (e.kind !== "calls") continue;
-    const key = e.meta?.branchKey;
-    if (!key) continue;
-    const mapKey = `${e.source}::${key}`;
-    if (!bySourceKey.has(mapKey)) bySourceKey.set(mapKey, []);
-    bySourceKey.get(mapKey)!.push(e);
+  let color = EDGE_COLOR.calls;
+  if (e.kind === "uses-tool" || e.kind === "handles-tool") color = EDGE_COLOR["uses-tool"];
+  else if (isLoop) color = EDGE_COLOR.loop;
+  else if (isBranch) color = EDGE_COLOR.branch;
+
+  let label: string | undefined;
+  if (e.aggregatedCount > 1) {
+    label = e.kind === "uses-tool" ? `${e.aggregatedCount} tools` : `×${e.aggregatedCount}`;
+  } else if (isLoop) {
+    label = "loop";
+  } else if (e.meta?.branchArm) {
+    label = e.meta.branchArm;
   }
-  for (const group of bySourceKey.values()) {
-    const arms = new Set<string>();
-    for (const e of group) arms.add(e.meta?.branchArm ?? "");
-    if (arms.size <= 1) continue;
-    for (const e of group) {
-      out.set(e.id, { groupSize: arms.size, armLabel: e.meta?.branchArm ?? "" });
-    }
-  }
-  return out;
+
+  // Focus dimming: when something is selected, fade edges not touching it.
+  const focused = !effectiveSel || e.source === effectiveSel || e.target === effectiveSel;
+  const opacity = focused ? 1 : 0.12;
+
+  return {
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    animated: e.kind === "calls" && isLoop,
+    label,
+    labelStyle: { fontSize: 10, fill: color, fontStyle: isBranch ? "italic" : "normal" },
+    labelBgStyle: { fill: "#161b22" },
+    labelBgPadding: [4, 2],
+    style: {
+      stroke: color,
+      strokeDasharray: dashed ? "5 4" : undefined,
+      strokeWidth: e.source === effectiveSel || e.target === effectiveSel ? 2 : 1.3,
+      opacity,
+    },
+  };
 }
 
 export type { GraphNode };

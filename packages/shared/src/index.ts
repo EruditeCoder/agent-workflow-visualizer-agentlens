@@ -9,8 +9,19 @@ export type NodeKind =
   | "function"
   | "llm-call"
   | "tool"
-  | "tool-handler"
+  | "tool-group"
   | "external";
+
+/** A tool's dispatch handler, folded into the tool node (1:1 in practice). */
+export interface ToolHandler {
+  fnId: string;
+  label: string;
+  signature?: string;
+  loc?: SourceLocation;
+  codeSnippet?: string;
+  codeTruncated?: boolean;
+  isAsync?: boolean;
+}
 
 export interface GraphNode {
   id: string;
@@ -39,6 +50,10 @@ export interface NodeMeta {
   containingFnId?: string;
   perCallerTools?: Record<string, string[]>;
   toolsResolution?: "literal" | "per-caller" | "unresolved";
+  /** For tool nodes: the dispatch handler folded into this node. */
+  handler?: ToolHandler;
+  /** For tool-group nodes: the ids of the tool nodes collapsed inside it. */
+  groupedToolIds?: string[];
 }
 
 export type EdgeKind =
