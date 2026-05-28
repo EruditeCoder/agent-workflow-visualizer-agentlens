@@ -85,7 +85,7 @@ function buildSteps(graph: Graph, sg: Subgraph): Step[] {
   const outEdges = new Map<string, GraphEdge[]>();
   for (const eid of sg.edgeIds) {
     const e = graph.edges.find((x) => x.id === eid);
-    if (!e || e.kind === "uses-tool") continue;
+    if (!e || e.kind === "uses-tool" || e.kind === "handles-tool") continue;
     if (!outEdges.has(e.source)) outEdges.set(e.source, []);
     outEdges.get(e.source)!.push(e);
   }

@@ -31,19 +31,27 @@ export function Canvas({ graph, selectedId, onSelect }: Props) {
       draggable: true,
     }));
     const rfEdges: RFEdge[] = laid.edges.map((e) => {
-      const dashed = e.kind === "uses-tool" || e.meta?.inLoop || e.meta?.inBranch;
+      const isLoop = !!e.meta?.inLoop;
+      const isBranch = !!e.meta?.inBranch;
+      const dashed = e.kind === "uses-tool" || e.kind === "handles-tool" || isLoop || isBranch;
       const color =
         e.kind === "uses-tool"
           ? "#8b949e"
-          : e.meta?.inLoop
-            ? "#f0883e"
-            : "#58a6ff";
+          : e.kind === "handles-tool"
+            ? "#a371f7"
+            : isLoop
+              ? "#f0883e"
+              : "#58a6ff";
+      let label: string | undefined;
+      if (e.kind === "uses-tool") label = undefined;
+      else if (e.kind === "handles-tool") label = "handles";
+      else if (isLoop) label = "loop";
       return {
         id: e.id,
         source: e.source,
         target: e.target,
-        animated: e.kind === "uses-tool" ? false : !!e.meta?.inLoop,
-        label: e.meta?.inLoop ? "loop" : undefined,
+        animated: e.kind === "calls" && isLoop,
+        label,
         labelStyle: { fontSize: 10, fill: color },
         labelBgStyle: { fill: "#161b22" },
         style: { stroke: color, strokeDasharray: dashed ? "4 3" : undefined, strokeWidth: 1.2 },

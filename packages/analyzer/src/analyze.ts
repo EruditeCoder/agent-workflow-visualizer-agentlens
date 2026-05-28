@@ -144,6 +144,8 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
     analyzeFunctionBody(fn, ctx, nodes, edges);
   }
 
+  detectToolDispatchers(ctx, nodes, edges);
+
   attachRecursionFlags(nodes, edges);
 
   const declaredEntries = new Set(
@@ -167,15 +169,20 @@ export async function analyze(rootDir: string, opts: AnalyzeOptions = {}): Promi
   const llmAndTools = [...llmNodes.map((n) => n.id), ...toolNodes.map((n) => n.id)];
   const reachesLLM = computeReverseReachable(llmAndTools, edges);
 
+  const toolHandlerIds = new Set<string>();
+  for (const e of edges) {
+    if (e.kind === "handles-tool") toolHandlerIds.add(e.target);
+  }
+
   let keepIds: Set<string>;
   if (pruneHelpers) {
-    keepIds = new Set<string>([...reachesLLM, ...llmAndTools]);
+    keepIds = new Set<string>([...reachesLLM, ...llmAndTools, ...toolHandlerIds]);
     for (const id of declaredEntries) {
       if (reachesLLM.has(id)) keepIds.add(id);
     }
   } else {
     const fromEntries = computeReachable([...declaredEntries], edges);
-    keepIds = new Set<string>([...fromEntries, ...reachesLLM, ...llmAndTools]);
+    keepIds = new Set<string>([...fromEntries, ...reachesLLM, ...llmAndTools, ...toolHandlerIds]);
   }
 
   for (const id of keepIds) {
@@ -1150,6 +1157,58 @@ function computeSubgraphs(nodes: GraphNode[], edges: GraphEdge[]): Subgraph[] {
   }
   subgraphs.sort((a, b) => b.nodeIds.length - a.nodeIds.length);
   return subgraphs;
+}
+
+function detectToolDispatchers(
+  ctx: AnalyzeContext,
+  nodes: Map<string, GraphNode>,
+  edges: GraphEdge[],
+): void {
+  const toolNodes = [...nodes.values()].filter((n) => n.kind === "tool");
+  if (toolNodes.length === 0) return;
+  const toolNamesInGraph = new Set(toolNodes.map((t) => t.label));
+
+  for (const fn of ctx.fnById.values()) {
+    fn.decl.forEachDescendant((d) => {
+      if (!Node.isSwitchStatement(d)) return;
+      for (const clause of d.getCaseBlock().getClauses()) {
+        if (!Node.isCaseClause(clause)) continue;
+        const caseExpr = clause.getExpression();
+        if (
+          !caseExpr ||
+          (!Node.isStringLiteral(caseExpr) && !Node.isNoSubstitutionTemplateLiteral(caseExpr))
+        ) {
+          continue;
+        }
+        const toolName = caseExpr.getLiteralValue();
+        if (!toolNamesInGraph.has(toolName)) continue;
+        let handler: FnRecord | undefined;
+        for (const stmt of clause.getStatements()) {
+          let body: Node | undefined;
+          if (Node.isReturnStatement(stmt)) body = stmt.getExpression() ?? undefined;
+          else if (Node.isExpressionStatement(stmt)) body = stmt.getExpression();
+          if (!body) continue;
+          if (Node.isAwaitExpression(body)) body = body.getExpression();
+          if (Node.isCallExpression(body)) {
+            handler = resolveCallTarget(body, fn, ctx);
+            break;
+          }
+        }
+        if (handler) {
+          const toolId = `tool:${toolName}`;
+          const edgeId = `e:${toolId}->${handler.id}#handles`;
+          if (!edges.some((e) => e.id === edgeId)) {
+            edges.push({
+              id: edgeId,
+              source: toolId,
+              target: handler.id,
+              kind: "handles-tool",
+            });
+          }
+        }
+      }
+    });
+  }
 }
 
 function attachRecursionFlags(nodes: Map<string, GraphNode>, edges: GraphEdge[]): void {
