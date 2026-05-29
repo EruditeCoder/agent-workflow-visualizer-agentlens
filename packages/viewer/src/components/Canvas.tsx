@@ -99,6 +99,12 @@ export function Canvas({ graph, selectedId, onSelect, filter = "" }: Props) {
         id: n.id,
         type: "awv",
         position: { x: n.x, y: n.y },
+        // Dagre's measured footprint. Nodes are controlled without onNodesChange,
+        // so React Flow never writes measured dims back onto the user node — which
+        // left the MiniMap (it reads the user node) unable to draw any rects.
+        // initialWidth/Height feed it dimensions without forcing the DOM card size.
+        initialWidth: n.width,
+        initialHeight: n.height,
         data: {
           node: n.node,
           dim: dimNode(n.id, isGroup, group?.members ?? []),
