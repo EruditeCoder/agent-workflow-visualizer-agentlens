@@ -11,6 +11,31 @@ npm run demo           # analyzes examples/ then starts the viewer
 
 Open the printed Vite URL. Each entry point in `examples/` becomes its own subgraph on the canvas.
 
+### Pick a folder from the UI
+
+You don't have to run the analyzer by hand. Just start the viewer and choose a
+folder in the browser:
+
+```bash
+npm run viewer         # starts the viewer; analyzes on demand
+```
+
+Click **📁 Open folder…** in the top bar, browse to any TypeScript agent
+project, and hit **Analyze this folder**. The dev server runs the analyzer on
+the chosen path and renders the graph immediately — no rebuild, no CLI. The
+result is also written to `viewer-data/graph.json`, so a plain reload keeps
+showing the last folder you analyzed.
+
+> The folder picker is backed by the Vite dev server's `/api/browse` and
+> `/api/analyze` endpoints (see `packages/viewer/vite-plugin-analyzer.ts`), so
+> it's available whenever the viewer is running in dev mode.
+
+The analyzer CLI still works too, if you'd rather script it:
+
+```bash
+node packages/analyzer/dist/cli.js <dir> --out viewer-data/graph.json
+```
+
 ## Layout
 
 - `packages/shared` — graph schema types shared by analyzer and viewer.
